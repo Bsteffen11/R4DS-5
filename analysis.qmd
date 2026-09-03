@@ -1,2 +1,137 @@
-Title: "wildfires and movies"
-Author: Brady Steffen
+---
+title: "wildfires and movies"
+author: Brady Steffen
+execute:
+  echo: false
+---
+
+```{r}
+#| message: false
+
+library(tidyverse)
+library(purrr)
+library(leaflet)
+library(rvest)
+library(httr2)
+library(jsonlite)
+```
+
+```{r}
+raw <- fromJSON("data/wildfires.geojson")
+length(raw$features)
+```
+
+```{r}
+first_fire <- raw$features[1, ]
+names(first_fire)
+```
+
+```{r}
+first_coordinate <- first_fire$geometry$coordinates[[1]][1, 1, ]
+first_coordinate
+```
+
+```{r}
+features_tbl <- tibble(features = raw$features)
+features_tbl
+```
+
+```{r}
+expanded_features <- features_tbl |>
+  unnest_wider(features)
+expanded_features
+```
+
+```{r}
+expanded_properties <- expanded_features |>
+  unnest_wider(properties)
+expanded_properties
+```
+
+```{r}
+#| cache: true
+fires <- expanded_properties |>
+  unnest_wider(geometry, names_sep = "_") |>
+  select(incident, gis_acres, fire_year, agency, state, geometry_coordinates) |>
+  mutate(
+    gis_acres = as.numeric(gis_acres),
+    fire_year = as.integer(fire_year)
+  )
+
+ggplot(fires, aes(x = gis_acres)) +
+  geom_histogram() +
+  scale_x_log10()
+
+fires |>
+  group_by(fire_year) |>
+  summarise(total_acres = sum(gis_acres, na.rm = TRUE)) |>
+  ggplot(aes(x = fire_year, y = total_acres)) +
+  geom_line() +
+  labs(
+    title = "Total Acres Burned per Year",
+    x = "Fire year",
+    y = "Total acres burned",
+    caption = "Source: wildfires GeoJSON dataset"
+  )
+
+top_states <- fires |>
+  group_by(state) |>
+  summarise(total_acres = sum(gis_acres, na.rm = TRUE)) |>
+  arrange(desc(total_acres)) |>
+  slice_head(n = 10)
+top_states
+```
+
+```{r}
+big_fires <- fires |>
+  filter(gis_acres >= 100000) |>
+  mutate(
+    lon = map_dbl(geometry_coordinates, \(x) mean(x[[1]][, , 1], na.rm = TRUE)),
+    lat = map_dbl(geometry_coordinates, \(x) mean(x[[1]][, , 2], na.rm = TRUE))
+  )
+```
+
+```{r}
+big_fires |>
+  count(agency) |>
+  ggplot(aes(x = agency, y = n)) +
+  geom_col() +
+  labs(
+    title = "Number of Big Fires by Managing Agency",
+    x = "Managing agency",
+    y = "Number of fires"
+  )
+```
+
+```{r}
+largest_fires <- big_fires |>
+  slice_max(gis_acres, n = 10, with_ties = FALSE) |>
+  mutate(
+    lng = map(geometry_coordinates, \(x) as.numeric(x[[1]][1, , 1])),
+    lat = map(geometry_coordinates, \(x) as.numeric(x[[1]][1, , 2]))
+  )
+
+map <- leaflet() |>
+  addTiles()
+
+for (i in seq_len(nrow(largest_fires))) {
+  map <- map |>
+    addPolygons(
+      lng = largest_fires$lng[[i]],
+      lat = largest_fires$lat[[i]],
+      popup = paste0(
+        "<strong>", largest_fires$incident[[i]], "</strong><br>",
+        "Year: ", largest_fires$fire_year[[i]], "<br>",
+        "Acreage: ", format(largest_fires$gis_acres[[i]], big.mark = ",")
+      )
+    )
+}
+
+map |>
+  fitBounds(
+    lng1 = min(unlist(largest_fires$lng)),
+    lat1 = min(unlist(largest_fires$lat)),
+    lng2 = max(unlist(largest_fires$lng)),
+    lat2 = max(unlist(largest_fires$lat))
+  )
+```
